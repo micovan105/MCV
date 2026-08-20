@@ -1,0 +1,201 @@
+import * as THREE from 'three';
+
+class MotionController {
+    constructor(nhanvat, camera, globalVatCan) {
+        this.nhanvat = nhanvat;
+        this.camera = camera;
+        this.globalVatCan = globalVatCan;
+
+        // --- CẤU HÌNH VẬT LÝ MẶC ĐỊNH ---
+        this.tocdodichuyen = 0.12;
+        this.tocdochaynhanh = 0.22;
+        this.lucnhay = 0.32;
+        this.trongluc = 0.015;
+        this.kichthuocbox = new THREE.Vector3(1, 1.8, 1);
+        this.vatcan = []; // Vật cản riêng cho nhân vật này (cộng dồn với globalVatCan)
+
+        // --- BỘ CÔNG TẮC BẬT / TẮT TÍNH NĂNG ---
+        this.status = {
+            active: true,      // Tắt/Bật toàn bộ vật lý của nhân vật này
+            dichuyen: true,    // Tắt/Bật di chuyển WASD
+            nhay: true,        // Tắt/Bật nhảy Space
+            chay: true,        // Tắt/Bật chạy nhanh Shift
+            trongluc: true,    // Tắt/Bật trọng lực
+            leodoc: true       // Tắt/Bật tự động leo dốc
+        };
+
+        // --- TRẠNG THÁI NỘI BỘ ---
+        this.vantocY = 0;
+        this.trenmatdat = false;
+        this.phimnhan = {};
+
+        // Vector dùng lại tối ưu bộ nhớ
+        this.huongtien = new THREE.Vector3();
+        this.huongngang = new THREE.Vector3();
+        this.tonghuong = new THREE.Vector3();
+        this.trucdung = new THREE.Vector3(0, 1, 0);
+        this.huongbanxuong = new THREE.Vector3(0, -1, 0);
+        
+        this.boxnhanvat = new THREE.Box3();
+        this.raycaster = new THREE.Raycaster();
+
+        this.initEvents();
+    }
+
+    initEvents() {
+        this._onKeyDown = (e) => { this.phimnhan[e.code] = true; };
+        this._onKeyUp = (e) => { this.phimnhan[e.code] = false; };
+        window.addEventListener('keydown', this._onKeyDown);
+        window.addEventListener('keyup', this._onKeyUp);
+    }
+
+    // --- HÀM TẮT (OFF) TÍNH NĂNG ---
+    off(feature) {
+        if (!feature) {
+            this.status.active = false; // Tắt sạch bộ vật lý
+        } else if (this.status.hasOwnProperty(feature)) {
+            this.status[feature] = false;
+        }
+        return this; // Trả về this để chain lệnh: MCV.Object3D(nv).off('nhay').off('chay')
+    }
+
+    // --- HÀM BẬT (RUN) TÍNH NĂNG ---
+    run(feature) {
+        if (!feature) {
+            this.status.active = true; // Bật lại toàn bộ vật lý
+        } else if (this.status.hasOwnProperty(feature)) {
+            this.status[feature] = true;
+        }
+        return this;
+    }
+
+    // Lấy danh sách vật cản gộp (Của nhân vật + Global)
+    getAllVatCan() {
+        return [...this.globalVatCan, ...this.vatcan];
+    }
+
+    // Kiểm tra va chạm Box3
+    checkvacham() {
+        const danhSachVatCan = this.getAllVatCan();
+        if (danhSachVatCan.length === 0) return false;
+
+        this.boxnhanvat.setFromCenterAndSize(this.nhanvat.position, this.kichthuocbox);
+        for (let i = 0; i < danhSachVatCan.length; i++) {
+            const boxVatCan = new THREE.Box3().setFromObject(danhSachVatCan[i]);
+            if (this.boxnhanvat.intersectsBox(boxVatCan)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // CẬP NHẬT VẬT LÝ DI CHUYỂN
+    update() {
+        if (!this.status.active) return; // Nếu tắt vật lý thì đéo làm gì cả
+
+        const danhSachVatCan = this.getAllVatCan();
+
+        // 1. DI CHUYỂN BẰNG BÀN PHÍM (WASD)
+        if (this.status.dichuyen) {
+            this.tonghuong.set(0, 0, 0);
+            this.camera.getWorldDirection(this.huongtien);
+            this.huongtien.y = 0;
+            this.huongtien.normalize();
+
+            this.huongngang.copy(this.trucdung).cross(this.huongtien).normalize();
+
+            // Check trạng thái chạy nhanh
+            const dangChayNhanh = this.status.chay && this.phimnhan["ShiftLeft"];
+            const tocdo = dangChayNhanh ? this.tocdochaynhanh : this.tocdodichuyen;
+
+            if (this.phimnhan["KeyW"]) this.tonghuong.addScaledVector(this.huongtien, tocdo);
+            if (this.phimnhan["KeyS"]) this.tonghuong.addScaledVector(this.huongtien, -tocdo);
+            if (this.phimnhan["KeyA"]) this.tonghuong.addScaledVector(this.huongngang, tocdo);
+            if (this.phimnhan["KeyD"]) this.tonghuong.addScaledVector(this.huongngang, -tocdo);
+
+            if (this.tonghuong.length() > tocdo) {
+                this.tonghuong.setLength(tocdo);
+            }
+
+            // Xử lý va chạm X, Z + Leo dốc
+            if (this.tonghuong.length() > 0) {
+                this.nhanvat.position.x += this.tonghuong.x;
+                if (this.checkvacham()) this.nhanvat.position.x -= this.tonghuong.x;
+
+                this.nhanvat.position.z += this.tonghuong.z;
+                if (this.checkvacham()) this.nhanvat.position.z -= this.tonghuong.z;
+
+                // Quét dốc
+                if (this.status.leodoc && danhSachVatCan.length > 0) {
+                    const viTriBan = this.nhanvat.position.clone().add(new THREE.Vector3(0, 1, 0));
+                    this.raycaster.set(viTriBan, this.huongbanxuong);
+                    const vaChamDoc = this.raycaster.intersectObjects(danhSachVatCan);
+
+                    if (vaChamDoc.length > 0) {
+                        const doCaoMietDoc = vaChamDoc[0].point.y + (this.kichthuocbox.y / 2);
+                        const chenhLach = doCaoMietDoc - this.nhanvat.position.y;
+
+                        if (chenhLach > 0 && chenhLach < 0.8 && this.trenmatdat) {
+                            this.nhanvat.position.y = doCaoMietDoc;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. XỬ LÝ NHẢY (SPACE)
+        if (this.status.nhay && this.phimnhan["Space"] && this.trenmatdat) {
+            this.vantocY = this.lucnhay;
+            this.trenmatdat = false;
+        }
+
+        // 3. TRỌNG LỰC & XỬ LÝ TRỤC Y
+        if (this.status.trongluc) {
+            this.nhanvat.position.y += this.vantocY;
+            this.vantocY -= this.trongluc;
+
+            if (this.checkvacham()) {
+                this.nhanvat.position.y -= this.vantocY;
+
+                if (this.vantocY < 0) {
+                    this.trenmatdat = true;
+                }
+                this.vantocY = 0;
+            } else {
+                this.trenmatdat = false;
+            }
+
+            // Reset khi rơi khỏi map
+            if (this.nhanvat.position.y < -30) {
+                this.nhanvat.position.set(0, 5, 0);
+                this.vantocY = 0;
+                this.trenmatdat = false;
+            }
+        }
+    }
+}
+
+// --- CLASS QUẢN LÝ CHÍNH (EXPORT OUT) ---
+export class MCVSystem {
+    constructor(camera) {
+        this.camera = camera;
+        this.vatcan = []; // Vật cản chung cho toàn hệ thống
+        this.controllers = new Map(); // Luu danh sach Controller cua tung Object3D
+    }
+
+    // Cú pháp gán/lấy controller cho nhân vật
+    Object3D(nhanvat) {
+        if (!this.controllers.has(nhanvat)) {
+            const controller = new MotionController(nhanvat, this.camera, this.vatcan);
+            this.controllers.set(nhanvat, controller);
+        }
+        return this.controllers.get(nhanvat);
+    }
+
+    // Hàm gọi trong requestAnimationFrame để chạy vật lý cho TẤT CẢ các Object3D đã đăng ký
+    motionPhysics() {
+        this.controllers.forEach((controller) => {
+            controller.update();
+        });
+    }
+}
