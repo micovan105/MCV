@@ -1,5 +1,3 @@
-import * as THREE from 'three';
-
 class MotionController {
     constructor(nhanvat, camera, globalVatCan) {
         this.nhanvat = nhanvat;
@@ -202,8 +200,8 @@ class MotionController {
     }
 }
 
-// --- CLASS QUẢN LÝ CHÍNH (EXPORT OUT) ---
-export class MCVSystem {
+// --- CLASS QUẢN LÝ CHÍNH ---
+class MCVSystem {
     constructor(camera) {
         this.camera = camera;
         this.vatcan = []; // Vật cản chung toàn hệ thống
