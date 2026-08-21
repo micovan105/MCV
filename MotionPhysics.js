@@ -225,7 +225,7 @@ class MotionController {
 
             // Reset khi rơi khỏi map (Đưa về vị trí safe)
             if (this.nhanvat.position.y < -50) {
-                this.nhanvat.position.set(0, 10, 0);
+                this.nhanvat.position.set(0, 20, 0);
                 this.vanTocHienTai.set(0, 0, 0);
                 this.trenmatdat = false;
             }
