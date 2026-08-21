@@ -2,8 +2,8 @@
  * VehiclePhysics.js - Vehicle System (Vehicle Control & Vật lý xe)
  * Bộ quản lý điều khiển & vật lý xe cho Three.js
  * (Gia tốc, vận tốc tối đa, khối lượng, lật xe, va chạm dạng box xoay đúng
- *  theo góc lái (OBB), ma sát mặt đường, camera bám xe, nitro tạm thời,
- *  tuân theo danh sách vật cản)
+ *  theo góc lái (OBB, tính bằng SAT - Separating Axis Theorem), ma sát mặt
+ *  đường, camera bám xe, nitro tạm thời, tuân theo danh sách vật cản)
  *
  * LƯU Ý: File này KHÔNG dùng tên class "MCVSystem" (trùng với MCVSystem của
  * MotionPhysics.js dùng cho nhân vật). Nếu trùng tên, file load sau sẽ ghi đè
@@ -46,6 +46,16 @@
  *   const mcvNguoi = new MCVSystem(camera);   // từ MotionPhysics.js
  *   const mcvXe    = new VehicleSystem(camera); // từ VehiclePhysics.js
  *   // Hai biến khác tên, hai class khác tên -> không còn đụng độ.
+ *
+ * FIX (bản này): sửa lỗi va chạm bị "phồng to" khi xe đánh lái chéo góc.
+ * Trước đây: xoay 8 đỉnh của box vật cản về hệ trục xe rồi BAO LẠI thành 1
+ * AABB mới (expandByPoint) -> khi hình chữ nhật bị xoay 1 góc bất kỳ (không
+ * phải bội số 90°), AABB bao nó luôn to hơn hình gốc (tối đa ~1.41 lần ở
+ * 45°) -> vật cản trông như phình ra, xe bị coi là va chạm sớm/rộng hơn
+ * thực tế. Nay thay bằng SAT (Separating Axis Theorem) 2D trên mặt phẳng
+ * XZ: so đúng 2 hình chữ nhật (1 xoay theo yaw của xe, 1 là AABB vật cản)
+ * bằng 4 trục kiểm tra (2 trục cục bộ của xe + 2 trục thế giới), không còn
+ * hiện tượng box bị phồng khi xoay.
  */
 
 class VehicleController {
@@ -131,21 +141,19 @@ class VehicleController {
         this.trucdung = new THREE.Vector3(0, 1, 0);
         this.huongbanxuong = new THREE.Vector3(0, -1, 0);
 
-        this.boxxe = new THREE.Box3();
         this.boxVatCanTemp = new THREE.Box3();
         this.raycaster = new THREE.Raycaster();
         this._vitricameratam = new THREE.Vector3();
         this._lookattam = new THREE.Vector3();
 
-        // --- CACHE CHO KIỂM TRA VA CHẠM DẠNG "BOX XOAY THEO XE" (OBB theo góc lái) ---
-        // Ý tưởng: thay vì so 2 AABB thẳng trục thế giới (box xe sẽ không xoay theo xe khi rẽ cua),
-        // ta đưa cả thế giới về hệ trục CỤC BỘ của xe (chỉ xoay theo yaw, bỏ qua góc nghiêng lật xe),
-        // để box của xe luôn là 1 AABB "thẳng" đúng kích thước, còn vật cản thì bị xoay ngược lại.
-        // Nhờ vậy box va chạm luôn bám đúng hướng thân xe dù xe quay bất kỳ góc nào.
-        this._quatyawnguoc = new THREE.Quaternion();
-        this._goc0 = new THREE.Vector3(0, 0, 0);
-        this._boxvatcancucbo = new THREE.Box3();
-        this._dinhtam = new THREE.Vector3();
+        // --- CACHE CHO KIỂM TRA VA CHẠM DẠNG "BOX XOAY THEO XE" (OBB theo góc lái, SAT 2D) ---
+        // Ý tưởng: so trực tiếp 2 hình chữ nhật trên mặt phẳng XZ bằng SAT thay vì xoay điểm
+        // rồi bao lại thành AABB (cách cũ khiến box bị "phồng to" khi xoay góc lẻ, ví dụ 45°).
+        // Trục Y (chiều cao) được kiểm tra riêng vì yaw không ảnh hưởng tới nó.
+        // Mảng dùng lại mỗi frame để tránh cấp phát object mới liên tục (đỡ GC).
+        this._gocXeXZ = [{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }];
+        this._gocVatCanXZ = [{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }];
+        this._cacTrucSAT = [{ x: 1, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 0 }, { x: 0, y: 1 }];
 
         this.capNhatKichThuocMacDinh();
         this.initEvents();
@@ -258,18 +266,10 @@ class VehicleController {
     }
 
     // Kiểm tra va chạm dạng OBB: box của xe LUÔN xoay đúng theo góc lái (yaw) hiện tại,
-    // thay vì là 1 AABB thẳng trục thế giới cố định như trước (khiến box "trơ" ra khi xe rẽ cua).
+    // so với AABB thế giới của từng vật cản, dùng SAT (không còn bị phồng box như cách cũ).
     checkvacham() {
         const danhSachVatCan = this.getAllVatCan();
         if (danhSachVatCan.length === 0) return false;
-
-        // Quay ngược theo đúng góc yaw hiện tại của xe -> đưa cả thế giới về hệ trục cục bộ của xe.
-        // Chỉ dùng rotation.y (yaw), KHÔNG dùng rotation.z (góc nghiêng khi lật xe) vì đó chỉ là
-        // hiệu ứng hình ảnh, không nên ảnh hưởng tới hình dạng/kích thước box va chạm.
-        this._quatyawnguoc.setFromAxisAngle(this.trucdung, -this.xe.rotation.y);
-
-        // Trong hệ quy chiếu của xe, box của chính nó luôn là 1 AABB thẳng, tâm tại gốc (0,0,0)
-        this.boxxe.setFromCenterAndSize(this._goc0, this.kichthuocbox);
 
         for (let i = 0; i < danhSachVatCan.length; i++) {
             const boxTheGioi = this._laybocuavatcan(danhSachVatCan[i]);
@@ -278,24 +278,79 @@ class VehicleController {
         return false;
     }
 
-    // Chuyển 8 đỉnh của 1 Box3 (thế giới) về hệ trục cục bộ của xe rồi so với box xe (đã ở gốc 0,0,0).
-    // Đây là cách kiểm tra OBB-vs-AABB đơn giản, đủ chính xác và rẻ cho vài chục vật cản mỗi frame.
-    _kiemtraobb(boxTheGioi) {
-        this._boxvatcancucbo.makeEmpty();
-        for (let dx = 0; dx <= 1; dx++) {
-            for (let dy = 0; dy <= 1; dy++) {
-                for (let dz = 0; dz <= 1; dz++) {
-                    this._dinhtam.set(
-                        dx ? boxTheGioi.max.x : boxTheGioi.min.x,
-                        dy ? boxTheGioi.max.y : boxTheGioi.min.y,
-                        dz ? boxTheGioi.max.z : boxTheGioi.min.z
-                    );
-                    this._dinhtam.sub(this.xe.position).applyQuaternion(this._quatyawnguoc);
-                    this._boxvatcancucbo.expandByPoint(this._dinhtam);
-                }
-            }
+    // Lấy 4 góc (mặt phẳng XZ) của box xe, ĐÃ xoay đúng theo rotation.y hiện tại, quanh
+    // vị trí thực của xe trong thế giới. Ghi thẳng vào this._gocXeXZ để tái sử dụng bộ nhớ.
+    _capnhatgocXeXZ(cos, sin) {
+        const hx = this.kichthuocbox.x / 2;
+        const hz = this.kichthuocbox.z / 2;
+        const px = this.xe.position.x;
+        const pz = this.xe.position.z;
+
+        // 4 góc cục bộ của xe trước khi xoay: (-hx,-hz) (hx,-hz) (hx,hz) (-hx,hz)
+        const lx = [-hx, hx, hx, -hx];
+        const lz = [-hz, -hz, hz, hz];
+
+        for (let i = 0; i < 4; i++) {
+            // Xoay góc (lx,lz) theo yaw rồi cộng vị trí xe -> ra toạ độ thế giới (x, z)
+            this._gocXeXZ[i].x = px + lx[i] * cos + lz[i] * sin;
+            this._gocXeXZ[i].y = pz - lx[i] * sin + lz[i] * cos;
         }
-        return this.boxxe.intersectsBox(this._boxvatcancucbo);
+    }
+
+    // Lấy 4 góc (mặt phẳng XZ) của 1 AABB vật cản (không xoay).
+    _capnhatgocVatCanXZ(boxTheGioi) {
+        this._gocVatCanXZ[0].x = boxTheGioi.min.x; this._gocVatCanXZ[0].y = boxTheGioi.min.z;
+        this._gocVatCanXZ[1].x = boxTheGioi.max.x; this._gocVatCanXZ[1].y = boxTheGioi.min.z;
+        this._gocVatCanXZ[2].x = boxTheGioi.max.x; this._gocVatCanXZ[2].y = boxTheGioi.max.z;
+        this._gocVatCanXZ[3].x = boxTheGioi.min.x; this._gocVatCanXZ[3].y = boxTheGioi.max.z;
+    }
+
+    // Kiểm tra va chạm giữa box xe (OBB, xoay theo yaw) và box vật cản (AABB) bằng SAT
+    // trên mặt phẳng XZ, cộng thêm kiểm tra riêng trục Y (chiều cao không bị ảnh hưởng bởi yaw).
+    _kiemtraobb(boxTheGioi) {
+        // 1. Trục Y kiểm tra riêng, kiểu AABB thường
+        const yMinXe = this.xe.position.y - this.kichthuocbox.y / 2;
+        const yMaxXe = this.xe.position.y + this.kichthuocbox.y / 2;
+        if (yMaxXe < boxTheGioi.min.y || boxTheGioi.max.y < yMinXe) return false;
+
+        // 2. SAT 2D trên XZ: 4 trục cần thử = 2 trục cục bộ của xe (theo yaw) + 2 trục thế giới
+        const yaw = this.xe.rotation.y;
+        const cos = Math.cos(yaw);
+        const sin = Math.sin(yaw);
+
+        this._capnhatgocXeXZ(cos, sin);
+        this._capnhatgocVatCanXZ(boxTheGioi);
+
+        // Trục cục bộ của xe: hướng "dọc thân xe" và "ngang thân xe"
+        this._cacTrucSAT[0].x = cos; this._cacTrucSAT[0].y = -sin;
+        this._cacTrucSAT[1].x = sin; this._cacTrucSAT[1].y = cos;
+        // Trục thế giới (vì vật cản là AABB, không xoay)
+        this._cacTrucSAT[2].x = 1; this._cacTrucSAT[2].y = 0;
+        this._cacTrucSAT[3].x = 0; this._cacTrucSAT[3].y = 1;
+
+        for (let i = 0; i < 4; i++) {
+            const truc = this._cacTrucSAT[i];
+
+            let minXe = Infinity, maxXe = -Infinity;
+            for (let k = 0; k < 4; k++) {
+                const d = this._gocXeXZ[k].x * truc.x + this._gocXeXZ[k].y * truc.y;
+                if (d < minXe) minXe = d;
+                if (d > maxXe) maxXe = d;
+            }
+
+            let minVc = Infinity, maxVc = -Infinity;
+            for (let k = 0; k < 4; k++) {
+                const d = this._gocVatCanXZ[k].x * truc.x + this._gocVatCanXZ[k].y * truc.y;
+                if (d < minVc) minVc = d;
+                if (d > maxVc) maxVc = d;
+            }
+
+            // Tìm được 1 trục tách rời -> chắc chắn KHÔNG va chạm, dừng sớm
+            if (maxXe < minVc || maxVc < minXe) return false;
+        }
+
+        // Không trục nào tách được -> có va chạm
+        return true;
     }
 
     // Xử lý phản ứng khi đâm vào vật cản: xe mất tốc theo khối lượng & nảy lại nhẹ.
