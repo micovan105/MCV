@@ -1,23 +1,33 @@
 /**
- * VehiclePhysics.js - MCV System (Vehicle Control & Vật lý xe)
+ * VehiclePhysics.js - Vehicle System (Vehicle Control & Vật lý xe)
  * Bộ quản lý điều khiển & vật lý xe cho Three.js
  * (Gia tốc, vận tốc tối đa, khối lượng, lật xe, va chạm, tuân theo danh sách vật cản)
  *
- * CÁCH DÙNG:
- *   const mcv = new MCVSystem(camera);
- *   mcv.globalVatCan = [...danhSachMeshVatCan];
+ * LƯU Ý: File này KHÔNG dùng tên class "MCVSystem" (trùng với MCVSystem của
+ * MotionPhysics.js dùng cho nhân vật). Nếu trùng tên, file load sau sẽ ghi đè
+ * class của file load trước trên window, gây lỗi khó hiểu (kể cả TDZ khi trùng
+ * tên biến trong script.js). Vì vậy hệ thống xe dùng tên riêng: VehicleSystem.
  *
- *   const xe = mcv.vehicle(xemay);       // Gán/tạo controller cho object xemay
+ * CÁCH DÙNG:
+ *   const mcvXe = new VehicleSystem(camera);
+ *   mcvXe.globalVatCan = [...danhSachMeshVatCan];
+ *
+ *   const xe = mcvXe.vehicle(xemay);       // Gán/tạo controller cho object xemay
  *   xe.tocdotoida = 30;
  *   xe.khoiluong  = 180;
  *
- *   mcv.vehicle.off(xemay);              // Tắt di chuyển của xemay (không cần giữ biến xe)
- *   mcv.vehicle.off(xemay, 'laixe');     // Chỉ tắt đánh lái
- *   mcv.vehicle.run(xemay);              // Bật lại toàn bộ
- *   mcv.vehicle.run(xemay, 'laixe');     // Bật lại riêng đánh lái
+ *   mcvXe.vehicle.off(xemay);              // Tắt di chuyển của xemay (không cần giữ biến xe)
+ *   mcvXe.vehicle.off(xemay, 'laixe');     // Chỉ tắt đánh lái
+ *   mcvXe.vehicle.run(xemay);              // Bật lại toàn bộ
+ *   mcvXe.vehicle.run(xemay, 'laixe');     // Bật lại riêng đánh lái
  *
  * Trong vòng lặp render:
- *   mcv.vehiclePhysics();
+ *   mcvXe.vehiclePhysics();
+ *
+ * DÙNG SONG SONG VỚI HỆ THỐNG NHÂN VẬT (MotionPhysics.js):
+ *   const mcvNguoi = new MCVSystem(camera);   // từ MotionPhysics.js
+ *   const mcvXe    = new VehicleSystem(camera); // từ VehiclePhysics.js
+ *   // Hai biến khác tên, hai class khác tên -> không còn đụng độ.
  */
  
 class VehicleController {
@@ -287,8 +297,8 @@ class VehicleController {
     }
 }
  
-// --- CLASS QUẢN LÝ CHÍNH ---
-class MCVSystem {
+// --- CLASS QUẢN LÝ CHÍNH (dành riêng cho xe, không trùng MCVSystem của nhân vật) ---
+class VehicleSystem {
     constructor(camera) {
         this.camera = camera;
         this.globalVatCan = []; // Vật cản chung toàn hệ thống
@@ -338,5 +348,5 @@ class MCVSystem {
 }
  
 if (typeof window !== 'undefined') {
-    window.MCVSystem = MCVSystem;
+    window.VehicleSystem = VehicleSystem;
 }
