@@ -1,6 +1,22 @@
 /**
  * MotionPhysics.js - MCV System
  * Bộ quản lý di chuyển & vật lý đơn giản cho Three.js (Fixed Collision & Dynamic BoundingBox)
+ *
+ * FIX (bản này): sửa lỗi nhân vật bị chặn bởi 1 box "phồng to / lệch" khi vật cản là 1
+ * object đang XOAY (ví dụ 1 chiếc xe từ VehiclePhysics.js đang đánh lái chéo góc).
+ *
+ * Nguyên nhân cũ: checkvacham() luôn tính box của MỌI vật cản bằng Box3.setFromObject(),
+ * hàm này trả về AABB theo trục THẾ GIỚI. Khi vật cản xoay 1 góc bất kỳ (không phải bội
+ * số 90°), AABB bao quanh nó luôn to hơn hình dạng thật (tối đa ~1.41 lần ở góc 45°)
+ * -> nhân vật cảm giác đụng phải 1 cái hộp vô hình to/lệch hơn vật thể thật.
+ *
+ * Cách sửa: cho phép 1 vật cản khai báo "hộp định hướng" (OOB) qua:
+ *   mesh.userData.oob = { kichthuoc: new THREE.Vector3(rong, cao, dai) };
+ * Khi đó nhân vật sẽ kiểm tra va chạm bằng SAT (AABB nhân vật vs OBB vật cản, xoay theo
+ * mesh.rotation.y) thay vì AABB-vs-AABB thẳng trục thế giới. VehiclePhysics.js (bản đã
+ * fix) tự động gắn userData.oob này cho chiếc xe, nên chỉ cần dùng chung globalVatCan là
+ * 2 hệ thống tương thích ngay, không cần cấu hình gì thêm. Vật cản KHÔNG khai báo oob
+ * (vật cản tĩnh, không xoay) vẫn dùng cách kiểm tra AABB cũ như trước, không đổi hành vi.
  */
 
 class MotionController {
@@ -18,7 +34,7 @@ class MotionController {
 
         // Tự động tính toán kích thước thực tế của nhân vật nếu có
         this.kichthuocbox = new THREE.Vector3(1, 1.8, 1);
-        this.offsetBox = new THREE.Vector3(0, 0, 0); // Độ lệch tâm
+        this.offsetBox = new THREE.Vector3(0, 0, 0); // Độ lệch tâm box so với nhanvat.position
         this.autoBoxSize = true; // Mặc định tự động tính theo model
 
         this.vatcan = []; // Vật cản riêng
@@ -48,9 +64,17 @@ class MotionController {
         this.trucdung = new THREE.Vector3(0, 1, 0);
         this.huongbanxuong = new THREE.Vector3(0, -1, 0);
         
+        this._tamNhanVat = new THREE.Vector3(); // Tâm box nhân vật (position + offsetBox)
         this.boxnhanvat = new THREE.Box3();
         this.boxVatCanTemp = new THREE.Box3(); 
         this.raycaster = new THREE.Raycaster();
+
+        // --- CACHE CHO KIỂM TRA VA CHẠM DẠNG "AABB NHÂN VẬT vs OBB VẬT CẢN XOAY" (SAT 2D) ---
+        // Dùng khi vật cản có khai báo userData.oob (ví dụ chiếc xe từ VehiclePhysics.js).
+        // Mảng tái sử dụng mỗi frame để tránh cấp phát object mới liên tục (đỡ GC).
+        this._gocNhanVatXZ = [{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }];
+        this._gocVatCanOOB = [{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }];
+        this._cacTrucSAT = [{ x: 1, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 0 }, { x: 0, y: 1 }];
 
         // Tự động đo kích thước ban đầu của nhân vật
         this.capNhatKichThuocMacDinh();
@@ -112,16 +136,91 @@ class MotionController {
         return [...this.globalVatCan, ...this.vatcan];
     }
 
-    // Kiểm tra va chạm đã sửa logic ôm trọn nhân vật
+    // Kiểm tra AABB (box nhân vật, không xoay) va chạm với 1 OBB (box vật cản xoay theo
+    // yaw của chính nó) bằng SAT trên mặt phẳng XZ, cộng kiểm tra riêng trục Y.
+    // tamVatCan: THREE.Vector3 (world position, coi là tâm box)
+    // kichthuocVatCan: THREE.Vector3 (rộng, cao, dài - kích thước LOCAL, chưa xoay)
+    // yaw: góc xoay quanh trục Y (rad)
+    _kiemtraAABBvsOBB(tamVatCan, kichthuocVatCan, yaw) {
+        // 1. Trục Y kiểm tra riêng (yaw không ảnh hưởng chiều cao)
+        const yMinVC = tamVatCan.y - kichthuocVatCan.y / 2;
+        const yMaxVC = tamVatCan.y + kichthuocVatCan.y / 2;
+        if (this.boxnhanvat.max.y < yMinVC || yMaxVC < this.boxnhanvat.min.y) return false;
+
+        // 2. SAT 2D trên mặt phẳng XZ
+        const cos = Math.cos(yaw);
+        const sin = Math.sin(yaw);
+        const hx = kichthuocVatCan.x / 2;
+        const hz = kichthuocVatCan.z / 2;
+
+        // 4 góc cục bộ của vật cản trước khi xoay: (-hx,-hz) (hx,-hz) (hx,hz) (-hx,hz)
+        const lx = [-hx, hx, hx, -hx];
+        const lz = [-hz, -hz, hz, hz];
+        for (let i = 0; i < 4; i++) {
+            this._gocVatCanOOB[i].x = tamVatCan.x + lx[i] * cos + lz[i] * sin;
+            this._gocVatCanOOB[i].y = tamVatCan.z - lx[i] * sin + lz[i] * cos;
+        }
+
+        // 4 góc của box nhân vật (AABB, không xoay)
+        this._gocNhanVatXZ[0].x = this.boxnhanvat.min.x; this._gocNhanVatXZ[0].y = this.boxnhanvat.min.z;
+        this._gocNhanVatXZ[1].x = this.boxnhanvat.max.x; this._gocNhanVatXZ[1].y = this.boxnhanvat.min.z;
+        this._gocNhanVatXZ[2].x = this.boxnhanvat.max.x; this._gocNhanVatXZ[2].y = this.boxnhanvat.max.z;
+        this._gocNhanVatXZ[3].x = this.boxnhanvat.min.x; this._gocNhanVatXZ[3].y = this.boxnhanvat.max.z;
+
+        // 4 trục cần thử: 2 trục thế giới (box nhân vật) + 2 trục cục bộ của vật cản (theo yaw)
+        this._cacTrucSAT[0].x = 1; this._cacTrucSAT[0].y = 0;
+        this._cacTrucSAT[1].x = 0; this._cacTrucSAT[1].y = 1;
+        this._cacTrucSAT[2].x = cos; this._cacTrucSAT[2].y = -sin;
+        this._cacTrucSAT[3].x = sin; this._cacTrucSAT[3].y = cos;
+
+        for (let i = 0; i < 4; i++) {
+            const truc = this._cacTrucSAT[i];
+
+            let minA = Infinity, maxA = -Infinity;
+            for (let k = 0; k < 4; k++) {
+                const d = this._gocNhanVatXZ[k].x * truc.x + this._gocNhanVatXZ[k].y * truc.y;
+                if (d < minA) minA = d;
+                if (d > maxA) maxA = d;
+            }
+
+            let minB = Infinity, maxB = -Infinity;
+            for (let k = 0; k < 4; k++) {
+                const d = this._gocVatCanOOB[k].x * truc.x + this._gocVatCanOOB[k].y * truc.y;
+                if (d < minB) minB = d;
+                if (d > maxB) maxB = d;
+            }
+
+            // Tìm được 1 trục tách rời -> chắc chắn KHÔNG va chạm, dừng sớm
+            if (maxA < minB || maxB < minA) return false;
+        }
+
+        // Không trục nào tách được -> có va chạm
+        return true;
+    }
+
+    // Kiểm tra va chạm: vật cản có userData.oob (khai báo là "hộp xoay") thì dùng SAT
+    // (AABB nhân vật vs OBB vật cản); vật cản thường thì vẫn dùng AABB-vs-AABB như cũ.
     checkvacham() {
         const danhSachVatCan = this.getAllVatCan();
         if (danhSachVatCan.length === 0) return false;
 
-        // Cập nhật vị trí Box3 chuẩn xác dựa trên vị trí nhân vật
-        this.boxnhanvat.setFromCenterAndSize(this.nhanvat.position, this.kichthuocbox);
+        // Cập nhật vị trí Box3 chuẩn xác dựa trên vị trí nhân vật (+ độ lệch tâm nếu có)
+        this._tamNhanVat.copy(this.nhanvat.position).add(this.offsetBox);
+        this.boxnhanvat.setFromCenterAndSize(this._tamNhanVat, this.kichthuocbox);
 
         for (let i = 0; i < danhSachVatCan.length; i++) {
-            this.boxVatCanTemp.setFromObject(danhSachVatCan[i]);
+            const obj = danhSachVatCan[i];
+
+            // Vật cản khai báo OOB (ví dụ 1 chiếc xe từ VehiclePhysics.js đang xoay theo
+            // yaw) -> kiểm tra bằng SAT, tránh bị "phồng to" AABB khi vật cản xoay chéo góc.
+            const oob = obj.userData && obj.userData.oob;
+            if (oob && oob.kichthuoc) {
+                if (this._kiemtraAABBvsOBB(obj.position, oob.kichthuoc, obj.rotation.y)) return true;
+                continue;
+            }
+
+            // Vật cản thường (không khai báo oob): giữ nguyên cách cũ, AABB-vs-AABB
+            this.boxVatCanTemp.setFromObject(obj);
             if (this.boxnhanvat.intersectsBox(this.boxVatCanTemp)) {
                 return true;
             }
