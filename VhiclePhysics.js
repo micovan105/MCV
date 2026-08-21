@@ -157,6 +157,15 @@ class VehicleController {
 
         this.capNhatKichThuocMacDinh();
         this.initEvents();
+
+        // Gắn OOB (Oriented Box) vào userData của xe để các hệ thống khác (ví dụ
+        // MotionPhysics.js / MCVSystem cho nhân vật) tự nhận diện và kiểm tra va chạm
+        // đúng theo góc xoay (yaw) của xe, thay vì dùng AABB thẳng trục thế giới (dễ bị
+        // "phồng to" khi xe xoay chéo góc). Tham chiếu thẳng tới this.kichthuocbox nên
+        // khi kích thước xe đổi (gọi lại capNhatKichThuocMacDinh hoặc setBoxSize) thì
+        // userData.oob cũng tự động cập nhật theo, không cần đồng bộ tay.
+        if (!this.xe.userData) this.xe.userData = {};
+        this.xe.userData.oob = { kichthuoc: this.kichthuocbox };
     }
 
     // Cho phép đọc/gán globalVatCan trực tiếp trên từng controller.
