@@ -13,7 +13,7 @@
  * CÁCH DÙNG CƠ BẢN:
  *   const mcvXe = new VehicleSystem(camera);
  *   mcvXe.globalVatCan = [...danhSachMeshVatCan];   // có thể GÁN LẠI bất cứ lúc nào,
- *                                                   // các xe đã tạo trước đó vẫn nhận đúng danh sách mới
+ *                                                    // các xe đã tạo trước đó vẫn nhận đúng danh sách mới
  *
  *   const xe = mcvXe.vehicle(xemay);       // Gán/tạo controller cho object xemay
  *   xe.tocdotoida = 30;
