@@ -1,6 +1,6 @@
 /**
  * MotionPhysics.js - MCV System
- * Bộ quản lý di chuyển & vật lý đơn giản cho Three.js
+ * Bộ quản lý di chuyển & vật lý đơn giản cho Three.js (Fixed Collision & Dynamic BoundingBox)
  */
 
 class MotionController {
@@ -13,10 +13,14 @@ class MotionController {
         this.tocdodichuyen = 7.0;       // Tốc độ đi bộ (m/s)
         this.tocdochaynhanh = 13.0;     // Tốc độ chạy nhanh (m/s)
         this.lucnhay = 11.0;            // Vận tốc nhảy đầu (m/s)
-        this.trongluc = 28.0;           // Gia tốc trọng lực (m/s²)
-        this.doMaSat = 14.0;             // Độ dừng/quán tính (Càng cao dừng càng nhanh)
-        
+        this.trongluc = 20.0;           // Gia tốc trọng lực (đã điều chỉnh tối ưu chống văng)
+        this.doMaSat = 14.0;             // Độ dừng/quán tính
+
+        // Tự động tính toán kích thước thực tế của nhân vật nếu có
         this.kichthuocbox = new THREE.Vector3(1, 1.8, 1);
+        this.offsetBox = new THREE.Vector3(0, 0, 0); // Độ lệch tâm
+        this.autoBoxSize = true; // Mặc định tự động tính theo model
+
         this.vatcan = []; // Vật cản riêng
 
         // --- BỘ CÔNG TẮC BẬT / TẮT TÍNH NĂNG ---
@@ -30,7 +34,7 @@ class MotionController {
         };
 
         // --- TRẠNG THÁI NỘI BỘ & VẬN TỐC ---
-        this.vanTocHienTai = new THREE.Vector3(); // Vận tốc thực tế (X, Y, Z)
+        this.vanTocHienTai = new THREE.Vector3(); 
         this.trenmatdat = false;
         this.phimnhan = {};
 
@@ -45,10 +49,32 @@ class MotionController {
         this.huongbanxuong = new THREE.Vector3(0, -1, 0);
         
         this.boxnhanvat = new THREE.Box3();
-        this.boxVatCanTemp = new THREE.Box3(); // Tái sử dụng Box3 tránh ngốn CPU
+        this.boxVatCanTemp = new THREE.Box3(); 
         this.raycaster = new THREE.Raycaster();
 
+        // Tự động đo kích thước ban đầu của nhân vật
+        this.capNhatKichThuocMacDinh();
         this.initEvents();
+    }
+
+    // LỆNH MỚI: Tự động đo BoundingBox của Mesh/Group nhân vật
+    capNhatKichThuocMacDinh() {
+        if (!this.nhanvat) return;
+        const tempBox = new THREE.Box3().setFromObject(this.nhanvat);
+        const size = new THREE.Vector3();
+        tempBox.getSize(size);
+        
+        // Nếu nhân vật có kích thước hợp lệ (lớn hơn 0)
+        if (size.x > 0 && size.y > 0 && size.z > 0) {
+            this.kichthuocbox.copy(size);
+        }
+    }
+
+    // LỆNH MỚI: Hàm đặt kích thước Box nhân vật thủ công theo ý muốn
+    setBoxSize(x, y, z) {
+        this.autoBoxSize = false;
+        this.kichthuocbox.set(x, y, z);
+        return this;
     }
 
     initEvents() {
@@ -75,7 +101,7 @@ class MotionController {
     run(feature) {
         if (!feature) {
             this.status.active = true;
-            this.clock.start(); // Restart clock khi bật lại
+            this.clock.start();
         } else if (this.status.hasOwnProperty(feature)) {
             this.status[feature] = true;
         }
@@ -86,12 +112,14 @@ class MotionController {
         return [...this.globalVatCan, ...this.vatcan];
     }
 
-    // Kiểm tra va chạm tối ưu (không new Box3 trong loop)
+    // Kiểm tra va chạm đã sửa logic ôm trọn nhân vật
     checkvacham() {
         const danhSachVatCan = this.getAllVatCan();
         if (danhSachVatCan.length === 0) return false;
 
+        // Cập nhật vị trí Box3 chuẩn xác dựa trên vị trí nhân vật
         this.boxnhanvat.setFromCenterAndSize(this.nhanvat.position, this.kichthuocbox);
+
         for (let i = 0; i < danhSachVatCan.length; i++) {
             this.boxVatCanTemp.setFromObject(danhSachVatCan[i]);
             if (this.boxnhanvat.intersectsBox(this.boxVatCanTemp)) {
@@ -103,7 +131,7 @@ class MotionController {
 
     // CẬP NHẬT VẬT LÝ
     update() {
-        const dt = Math.min(this.clock.getDelta(), 0.1); // Giới hạn delta time chống giật lag khi drop FPS
+        const dt = Math.min(this.clock.getDelta(), 0.1); 
 
         if (!this.status.active) return;
 
@@ -178,7 +206,7 @@ class MotionController {
             this.trenmatdat = false;
         }
 
-        // 6. TRỌNG LỰC & XỬ LÝ TRỤC Y
+        // 6. TRỌNG LỰC & XỬ LÝ TRỤC Y (Chống chui đất)
         if (this.status.trongluc) {
             this.vanTocHienTai.y -= this.trongluc * dt;
             const deltaY = this.vanTocHienTai.y * dt;
@@ -195,9 +223,9 @@ class MotionController {
                 this.trenmatdat = false;
             }
 
-            // Reset khi rơi khỏi map
-            if (this.nhanvat.position.y < -30) {
-                this.nhanvat.position.set(0, 5, 0);
+            // Reset khi rơi khỏi map (Đưa về vị trí safe)
+            if (this.nhanvat.position.y < -50) {
+                this.nhanvat.position.set(0, 10, 0);
                 this.vanTocHienTai.set(0, 0, 0);
                 this.trenmatdat = false;
             }
