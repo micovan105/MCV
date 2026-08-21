@@ -1,16 +1,18 @@
 /**
  * VehiclePhysics.js - Vehicle System (Vehicle Control & Vật lý xe)
  * Bộ quản lý điều khiển & vật lý xe cho Three.js
- * (Gia tốc, vận tốc tối đa, khối lượng, lật xe, va chạm, tuân theo danh sách vật cản)
+ * (Gia tốc, vận tốc tối đa, khối lượng, lật xe, va chạm, ma sát mặt đường,
+ *  camera bám xe, nitro tạm thời, tuân theo danh sách vật cản)
  *
  * LƯU Ý: File này KHÔNG dùng tên class "MCVSystem" (trùng với MCVSystem của
  * MotionPhysics.js dùng cho nhân vật). Nếu trùng tên, file load sau sẽ ghi đè
  * class của file load trước trên window, gây lỗi khó hiểu (kể cả TDZ khi trùng
  * tên biến trong script.js). Vì vậy hệ thống xe dùng tên riêng: VehicleSystem.
  *
- * CÁCH DÙNG:
+ * CÁCH DÙNG CƠ BẢN:
  *   const mcvXe = new VehicleSystem(camera);
- *   mcvXe.globalVatCan = [...danhSachMeshVatCan];
+ *   mcvXe.globalVatCan = [...danhSachMeshVatCan];   // có thể GÁN LẠI bất cứ lúc nào,
+ *                                                    // các xe đã tạo trước đó vẫn nhận đúng danh sách mới
  *
  *   const xe = mcvXe.vehicle(xemay);       // Gán/tạo controller cho object xemay
  *   xe.tocdotoida = 30;
@@ -24,6 +26,21 @@
  * Trong vòng lặp render:
  *   mcvXe.vehiclePhysics();
  *
+ * TÍNH NĂNG NÂNG CAO:
+ *   xe.status.camera = true;               // Bật camera tự bám theo xe (kiểu góc nhìn thứ 3)
+ *   xe.cauHinhCamera.khoangCachSau = 10;    // Chỉnh khoảng cách/độ cao/độ trễ camera
+ *
+ *   xe.tangToc(1.6, 3);                    // Nitro: x1.6 tốc độ & gia tốc trong 3 giây rồi tự trả lại
+ *
+ *   // Ma sát mặt đường theo từng vật cản (mặc định heSoMaSat = 1):
+ *   mesh.userData.heSoMaSat = 2.2;         // Bùn/cỏ: xe lăn chậm & phanh ngắn hơn
+ *   mesh.userData.heSoMaSat = 0.35;        // Băng: xe trôi trượt, phanh dài hơn
+ *
+ *   // Vật cản di chuyển (không cache bounding box, luôn tính lại mỗi frame):
+ *   mesh.userData.dongtinh = true;
+ *   // Nếu bạn tự di chuyển 1 vật cản "tĩnh" (không có dongtinh), nhớ làm mới cache:
+ *   mcvXe.lamMoiBoxVatCan(mesh);           // hoặc mcvXe.xoaCacheBox() để xoá hết
+ *
  * DÙNG SONG SONG VỚI HỆ THỐNG NHÂN VẬT (MotionPhysics.js):
  *   const mcvNguoi = new MCVSystem(camera);   // từ MotionPhysics.js
  *   const mcvXe    = new VehicleSystem(camera); // từ VehiclePhysics.js
@@ -31,10 +48,13 @@
  */
  
 class VehicleController {
-    constructor(xe, camera, globalVatCan) {
+    constructor(xe, owner) {
         this.xe = xe;
-        this.camera = camera;               // Không bắt buộc, chỉ dùng nếu muốn camera bám theo xe
-        this.globalVatCan = globalVatCan;    // Mảng vật cản chung (tham chiếu từ MCVSystem)
+        this.owner = owner || null;         // Tham chiếu VehicleSystem cha (để lấy globalVatCan "sống" & cache box dùng chung)
+        this.camera = this.owner ? this.owner.camera : null; // Không bắt buộc, chỉ dùng nếu bật status.camera
+ 
+        // Nếu tạo controller độc lập (không qua VehicleSystem), dùng mảng nội bộ riêng
+        this._globalVatCanDoclap = [];
  
         // --- CẤU HÌNH VẬT LÝ XE (chỉnh trực tiếp qua xe.<tên>) ---
         this.giatoc = 8.0;              // Gia tốc khi ga (m/s²)
@@ -50,6 +70,13 @@ class VehicleController {
         this.khoiluong = 1000;
         this.khoiluongthamchieu = 1000; // Mốc tham chiếu để tính hệ số quán tính tương đối
  
+        // --- CẤU HÌNH VA CHẠM ---
+        this.heSoNayVaCham = 0.15;      // Hệ số nảy lại khi đâm vật cản (0 = dừng khựng, càng lớn càng nảy mạnh)
+ 
+        // --- CẤU HÌNH MA SÁT MẶT ĐƯỜNG THEO userData.heSoMaSat CỦA VẬT CẢN BÊN DƯỚI ---
+        this.heSoMaSatMacDinh = 1.0;    // Dùng khi không đứng trên vật cản nào có heSoMaSat riêng
+        this.heSoMaSatHienTai = 1.0;    // Đọc để biết mặt đường hiện tại (chỉ đọc, tự cập nhật mỗi frame)
+ 
         // --- CẤU HÌNH LẬT XE ---
         this.nguonggoclat = 0.55;       // Ngưỡng góc nghiêng (rad) để xe bị coi là lật (~31.5°)
         this.docamnghieng = 6.0;        // Tốc độ hồi phục góc nghiêng khi hết đánh lái
@@ -59,6 +86,13 @@ class VehicleController {
         this.kichthuocbox = new THREE.Vector3(2, 1.4, 4.2); // rộng, cao, dài mặc định
         this.autoBoxSize = true;
         this.vatcan = []; // Vật cản riêng của xe này (ngoài globalVatCan)
+ 
+        // --- CẤU HÌNH CAMERA BÁM THEO XE (chỉ hoạt động khi status.camera = true) ---
+        this.cauHinhCamera = {
+            khoangCachSau: 8,   // Khoảng cách phía sau xe
+            doCao: 3.5,         // Độ cao so với xe
+            doTre: 5,           // Độ trễ bám theo (càng lớn càng mượt nhưng chậm bám hơn)
+        };
  
         // --- CÔNG TẮC BẬT/TẮT TÍNH NĂNG ---
         this.status = {
@@ -70,6 +104,7 @@ class VehicleController {
             leodoc: true,
             vacham: true,
             lat: true,       // Bật/tắt mô phỏng lật xe
+            camera: false,   // Bật/tắt camera tự bám theo xe
         };
  
         // --- TRẠNG THÁI NỘI BỘ ---
@@ -80,8 +115,12 @@ class VehicleController {
         this.dangbilat = false;         // true khi xe đang trong trạng thái "lật"
         this.phimnhan = {};
  
+        this._giaTocGoc = null;         // Lưu giá trị gốc khi dùng tangToc()
+        this._tocDoToiDaGoc = null;
+        this._boostTimeout = null;
+ 
         // Callback tuỳ chọn
-        this.onVaCham = null;   // (lucVaCham) => {}
+        this.onVaCham = null;   // (lucVaCham, thongTin) => {}   thongTin = { truc, capTruc }
         this.onLat = null;      // () => {}
  
         this.clock = new THREE.Clock();
@@ -94,9 +133,23 @@ class VehicleController {
         this.boxxe = new THREE.Box3();
         this.boxVatCanTemp = new THREE.Box3();
         this.raycaster = new THREE.Raycaster();
+        this._viTriCameraTam = new THREE.Vector3();
+        this._lookAtTam = new THREE.Vector3();
  
         this.capNhatKichThuocMacDinh();
         this.initEvents();
+    }
+ 
+    // Cho phép đọc/gán globalVatCan trực tiếp trên từng controller.
+    // - Nếu controller thuộc 1 VehicleSystem: đọc/ghi thẳng vào mảng "sống" của hệ thống đó
+    //   (mọi xe dùng chung 1 nguồn, gán lại ở đâu cũng đồng bộ ngay lập tức).
+    // - Nếu controller được tạo độc lập (không qua VehicleSystem): dùng mảng riêng của nó.
+    get globalVatCan() {
+        return this.owner ? this.owner.globalVatCan : this._globalVatCanDoclap;
+    }
+    set globalVatCan(mang) {
+        if (this.owner) this.owner.globalVatCan = mang;
+        else this._globalVatCanDoclap = mang;
     }
  
     capNhatKichThuocMacDinh() {
@@ -125,6 +178,7 @@ class VehicleController {
     destroy() {
         window.removeEventListener('keydown', this._onKeyDown);
         window.removeEventListener('keyup', this._onKeyUp);
+        if (this._boostTimeout) clearTimeout(this._boostTimeout);
     }
  
     // TẮT: off() tắt hết, off('laixe') chỉ tắt đánh lái, v.v.
@@ -141,8 +195,36 @@ class VehicleController {
         return this;
     }
  
+    // NITRO / TĂNG TỐC TẠM THỜI: nhân giatoc & tocdotoida trong "giay" giây rồi tự trả về gốc.
+    // Gọi lại lúc đang boost sẽ reset lại thời gian đếm ngược (không cộng dồn hệ số).
+    tangToc(heSo = 1.5, giay = 3) {
+        if (this._boostTimeout) clearTimeout(this._boostTimeout);
+        if (this._giaTocGoc === null) {
+            this._giaTocGoc = this.giatoc;
+            this._tocDoToiDaGoc = this.tocdotoida;
+        }
+        this.giatoc = this._giaTocGoc * heSo;
+        this.tocdotoida = this._tocDoToiDaGoc * heSo;
+        this._boostTimeout = setTimeout(() => {
+            this.giatoc = this._giaTocGoc;
+            this.tocdotoida = this._tocDoToiDaGoc;
+            this._giaTocGoc = null;
+            this._tocDoToiDaGoc = null;
+            this._boostTimeout = null;
+        }, giay * 1000);
+        return this;
+    }
+ 
     getAllVatCan() {
         return [...this.globalVatCan, ...this.vatcan];
+    }
+ 
+    // Lấy Box3 thế giới của 1 vật cản - dùng cache dùng chung (qua owner) nếu có, để tránh
+    // tính lại setFromObject() cho từng vật cản tĩnh ở mỗi frame, mỗi xe.
+    _layBoxCuaVatCan(obj) {
+        if (this.owner) return this.owner.layBoxVatCan(obj);
+        this.boxVatCanTemp.setFromObject(obj);
+        return this.boxVatCanTemp;
     }
  
     // Kiểm tra va chạm dựa trên AABB quanh tâm xe
@@ -153,24 +235,47 @@ class VehicleController {
         this.boxxe.setFromCenterAndSize(this.xe.position, this.kichthuocbox);
  
         for (let i = 0; i < danhSachVatCan.length; i++) {
-            this.boxVatCanTemp.setFromObject(danhSachVatCan[i]);
-            if (this.boxxe.intersectsBox(this.boxVatCanTemp)) return true;
+            const box = this._layBoxCuaVatCan(danhSachVatCan[i]);
+            if (this.boxxe.intersectsBox(box)) return true;
         }
         return false;
     }
  
-    // Xử lý phản ứng khi đâm vào vật cản: xe dội lại và mất tốc theo khối lượng
-    xuLyVaCham(deltaTruoc) {
+    // Xử lý phản ứng khi đâm vào vật cản: xe mất tốc theo khối lượng & nảy lại nhẹ.
+    // Vị trí đã được hoàn tác theo từng trục ở update() trước khi gọi hàm này,
+    // nên ở đây chỉ cần xử lý tốc độ + báo callback.
+    xuLyVaCham(vaChamTrucX, vaChamTrucZ) {
         const lucVaCham = Math.abs(this.tocdo) * (this.khoiluong / this.khoiluongthamchieu);
  
-        // Lùi xe lại vị trí trước va chạm
-        this.xe.position.sub(deltaTruoc);
- 
         // Xe nặng mất tốc ít hơn, xe nhẹ mất tốc nhiều hơn (nảy lại một phần)
-        const heSoDoiHuong = -0.15 * (this.khoiluongthamchieu / this.khoiluong);
+        const heSoDoiHuong = -this.heSoNayVaCham * (this.khoiluongthamchieu / this.khoiluong);
         this.tocdo *= heSoDoiHuong;
  
-        if (this.onVaCham) this.onVaCham(lucVaCham);
+        if (this.onVaCham) {
+            this.onVaCham(lucVaCham, {
+                truc: vaChamTrucX && vaChamTrucZ ? 'ca-hai' : (vaChamTrucX ? 'x' : 'z'),
+                capTruc: vaChamTrucX && vaChamTrucZ,
+            });
+        }
+    }
+ 
+    // Bắn tia xuống dưới gầm xe để: (1) hỗ trợ leo dốc, (2) đọc hệ số ma sát mặt đường
+    // từ userData.heSoMaSat của vật cản đang đứng lên trên (nếu có).
+    _capNhatMatDatVaMaSat(danhSachVatCan) {
+        this.heSoMaSatHienTai = this.heSoMaSatMacDinh;
+        if (!this.status.leodoc || danhSachVatCan.length === 0) return null;
+ 
+        const viTriBan = this.xe.position.clone().add(new THREE.Vector3(0, 0.5, 0));
+        this.raycaster.set(viTriBan, this.huongbanxuong);
+        const vaChamDoc = this.raycaster.intersectObjects(danhSachVatCan);
+ 
+        if (vaChamDoc.length > 0) {
+            const vatCanBenDuoi = vaChamDoc[0].object;
+            if (vatCanBenDuoi.userData && typeof vatCanBenDuoi.userData.heSoMaSat === 'number') {
+                this.heSoMaSatHienTai = vatCanBenDuoi.userData.heSoMaSat;
+            }
+        }
+        return vaChamDoc;
     }
  
     update() {
@@ -178,6 +283,10 @@ class VehicleController {
         if (!this.status.active) return;
  
         const danhSachVatCan = this.getAllVatCan();
+ 
+        // 0. MẶT ĐƯỜNG / MA SÁT (dùng chung tia bắn xuống cho cả leo dốc lẫn ma sát)
+        const vaChamDocDaTinh = this._capNhatMatDatVaMaSat(danhSachVatCan);
+        const heSoMaSat = this.heSoMaSatHienTai;
  
         // 1. GA / LÙI / PHANH
         if (this.status.dichuyen && !this.dangbilat) {
@@ -193,13 +302,15 @@ class VehicleController {
             } else if (dangLui) {
                 this.tocdo -= this.giatoclui * heSoQuanTinh * dt;
             } else {
-                const canLan = this.hesolan * dt;
+                // Cản lăn: mặt đường trơn (heSoMaSat < 1) khiến xe trôi xa hơn khi buông ga
+                const canLan = this.hesolan * heSoMaSat * dt;
                 if (Math.abs(this.tocdo) <= canLan) this.tocdo = 0;
                 else this.tocdo -= Math.sign(this.tocdo) * canLan;
             }
  
             if (dangPhanhTay) {
-                const phanh = this.lucphanh * heSoQuanTinh * dt;
+                // Mặt đường trơn cũng làm quãng đường phanh dài hơn
+                const phanh = this.lucphanh * heSoMaSat * heSoQuanTinh * dt;
                 if (Math.abs(this.tocdo) <= phanh) this.tocdo = 0;
                 else this.tocdo -= Math.sign(this.tocdo) * phanh;
             }
@@ -219,6 +330,11 @@ class VehicleController {
             if (dangQuay !== 0) {
                 this.xe.rotation.y += dangQuay * chieu * this.tocdovolang * heSoToc * dt;
             }
+        }
+ 
+        // Chuẩn hoá góc xoay Y để tránh số float phình to sau thời gian dài chạy
+        if (this.xe.rotation.y > Math.PI * 2 || this.xe.rotation.y < -Math.PI * 2) {
+            this.xe.rotation.y = this.xe.rotation.y % (Math.PI * 2);
         }
  
         // 3. TÍNH GÓC NGHIÊNG (ROLL) & KIỂM TRA LẬT XE
@@ -244,30 +360,39 @@ class VehicleController {
             this.xe.rotation.z = this.gocnghieng;
         }
  
-        // 4. DI CHUYỂN THEO HƯỚNG THÂN XE + VA CHẠM
+        // 4. DI CHUYỂN THEO HƯỚNG THÂN XE + VA CHẠM (trượt theo từng trục thay vì dừng khựng)
         if (Math.abs(this.tocdo) > 0.001) {
             this.huongTienXe.set(0, 0, 1).applyQuaternion(this.xe.quaternion);
-            const delta = this.huongTienXe.multiplyScalar(this.tocdo * dt);
+            const full = this.huongTienXe.multiplyScalar(this.tocdo * dt);
  
-            this.xe.position.add(delta);
+            if (this.status.vacham) {
+                let vaChamTrucX = false;
+                let vaChamTrucZ = false;
  
-            if (this.status.vacham && this.checkvacham()) {
-                this.xuLyVaCham(delta);
+                // Thử trục X trước, nếu chạm thì hoàn tác riêng trục X
+                if (Math.abs(full.x) > 0) {
+                    this.xe.position.x += full.x;
+                    if (this.checkvacham()) { this.xe.position.x -= full.x; vaChamTrucX = true; }
+                }
+                // Rồi thử trục Z độc lập -> cho phép xe "trượt" dọc theo tường thay vì khựng lại
+                if (Math.abs(full.z) > 0) {
+                    this.xe.position.z += full.z;
+                    if (this.checkvacham()) { this.xe.position.z -= full.z; vaChamTrucZ = true; }
+                }
+ 
+                if (vaChamTrucX || vaChamTrucZ) this.xuLyVaCham(vaChamTrucX, vaChamTrucZ);
+            } else {
+                this.xe.position.x += full.x;
+                this.xe.position.z += full.z;
             }
         }
  
-        // 5. LEO DỐC / MẶT NGHIÊNG
-        if (this.status.leodoc && Math.abs(this.tocdo) > 0.1 && danhSachVatCan.length > 0) {
-            const viTriBan = this.xe.position.clone().add(new THREE.Vector3(0, 0.5, 0));
-            this.raycaster.set(viTriBan, this.huongbanxuong);
-            const vaChamDoc = this.raycaster.intersectObjects(danhSachVatCan);
- 
-            if (vaChamDoc.length > 0) {
-                const doCaoMietDoc = vaChamDoc[0].point.y + (this.kichthuocbox.y / 2);
-                const chenhLach = doCaoMietDoc - this.xe.position.y;
-                if (chenhLach > 0 && chenhLach < 0.6 && this.trenmatdat) {
-                    this.xe.position.y = doCaoMietDoc;
-                }
+        // 5. LEO DỐC / MẶT NGHIÊNG (dùng lại kết quả tia bắn xuống đã tính ở bước 0)
+        if (this.status.leodoc && Math.abs(this.tocdo) > 0.1 && vaChamDocDaTinh && vaChamDocDaTinh.length > 0) {
+            const doCaoMietDoc = vaChamDocDaTinh[0].point.y + (this.kichthuocbox.y / 2);
+            const chenhLach = doCaoMietDoc - this.xe.position.y;
+            if (chenhLach > 0 && chenhLach < 0.6 && this.trenmatdat) {
+                this.xe.position.y = doCaoMietDoc;
             }
         }
  
@@ -294,6 +419,26 @@ class VehicleController {
                 this.trenmatdat = false;
             }
         }
+ 
+        // 7. CAMERA BÁM THEO XE (chỉ chạy khi bật status.camera và có camera)
+        this._capNhatCamera(dt);
+    }
+ 
+    _capNhatCamera(dt) {
+        if (!this.status.camera || !this.camera) return;
+ 
+        const cfg = this.cauHinhCamera;
+        this._viTriCameraTam
+            .set(0, cfg.doCao, -cfg.khoangCachSau)
+            .applyQuaternion(this.xe.quaternion)
+            .add(this.xe.position);
+ 
+        // Độ trễ mượt, không phụ thuộc framerate
+        const heSoLerp = 1 - Math.pow(0.001, dt * (cfg.doTre / 5));
+        this.camera.position.lerp(this._viTriCameraTam, THREE.MathUtils.clamp(heSoLerp, 0, 1));
+ 
+        this._lookAtTam.copy(this.xe.position).add(this.trucdung);
+        this.camera.lookAt(this._lookAtTam);
     }
 }
  
@@ -301,8 +446,12 @@ class VehicleController {
 class VehicleSystem {
     constructor(camera) {
         this.camera = camera;
-        this.globalVatCan = []; // Vật cản chung toàn hệ thống
+        this.globalVatCan = []; // Vật cản chung toàn hệ thống (có thể GÁN LẠI bất cứ lúc nào)
         this.controllers = new Map();
+ 
+        // Cache Box3 thế giới cho vật cản "tĩnh" (dùng chung giữa mọi xe, tránh tính lại mỗi frame).
+        // Vật cản có userData.dongtinh === true sẽ KHÔNG được cache, luôn tính lại mỗi lần kiểm tra.
+        this._boxCache = new Map();
  
         // --- API DẠNG HÀM: mcv.vehicle(xemay) ---
         // Cho phép vừa gọi như hàm để lấy/tạo controller,
@@ -312,7 +461,7 @@ class VehicleSystem {
         const vehicleFn = function (xemay) {
             if (!xemay) return null;
             if (!he.controllers.has(xemay)) {
-                const controller = new VehicleController(xemay, he.camera, he.globalVatCan);
+                const controller = new VehicleController(xemay, he);
                 he.controllers.set(xemay, controller);
             }
             return he.controllers.get(xemay);
@@ -340,6 +489,30 @@ class VehicleSystem {
         };
  
         this.vehicle = vehicleFn;
+    }
+ 
+    // Lấy Box3 thế giới của 1 vật cản, dùng cache nếu vật cản là "tĩnh"
+    // (mặc định mọi vật cản được coi là tĩnh, trừ khi đặt userData.dongtinh = true).
+    layBoxVatCan(obj) {
+        const laDongTinh = !!(obj.userData && obj.userData.dongtinh === true);
+        if (!laDongTinh) {
+            const cached = this._boxCache.get(obj);
+            if (cached) return cached;
+        }
+        const box = new THREE.Box3().setFromObject(obj);
+        if (!laDongTinh) this._boxCache.set(obj, box);
+        return box;
+    }
+ 
+    // Xoá cache box của 1 vật cản cụ thể - gọi sau khi bạn tự di chuyển/biến đổi
+    // một vật cản vốn được coi là "tĩnh" (không có userData.dongtinh = true).
+    lamMoiBoxVatCan(obj) {
+        this._boxCache.delete(obj);
+    }
+ 
+    // Xoá toàn bộ cache box - gọi sau khi thay đổi hàng loạt globalVatCan hoặc load lại map.
+    xoaCacheBox() {
+        this._boxCache.clear();
     }
  
     vehiclePhysics() {
