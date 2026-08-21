@@ -1,3 +1,8 @@
+/**
+ * MotionPhysics.js - MCV System
+ * Bộ quản lý di chuyển & vật lý đơn giản cho Three.js
+ */
+
 class MotionController {
     constructor(nhanvat, camera, globalVatCan) {
         this.nhanvat = nhanvat;
@@ -96,7 +101,7 @@ class MotionController {
         return false;
     }
 
-    // CẬP NHẬT VẬT LÝ Chuẩn Roblox
+    // CẬP NHẬT VẬT LÝ
     update() {
         const dt = Math.min(this.clock.getDelta(), 0.1); // Giới hạn delta time chống giật lag khi drop FPS
 
@@ -127,18 +132,18 @@ class MotionController {
             }
         }
 
-        // 2. GIA TỐC & TẠO ĐỘ TRUỢT QUÁN TÍNH (Mượt như Roblox)
+        // 2. GIA TỐC & TẠO ĐỘ TRUỢT QUÁN TÍNH
         const lerpFactor = Math.min(this.doMaSat * dt, 1.0);
         this.vanTocHienTai.x += (this.huongMuonDi.x - this.vanTocHienTai.x) * lerpFactor;
         this.vanTocHienTai.z += (this.huongMuonDi.z - this.vanTocHienTai.z) * lerpFactor;
 
-        // 3. XỬ LÝ VA CHẠM TRỤC X & Z (Wall-sliding - Trượt tường)
+        // 3. XỬ LÝ VA CHẠM TRỤC X & Z (Wall-sliding)
         if (Math.abs(this.vanTocHienTai.x) > 0.001) {
             const deltaX = this.vanTocHienTai.x * dt;
             this.nhanvat.position.x += deltaX;
             if (this.checkvacham()) {
                 this.nhanvat.position.x -= deltaX;
-                this.vanTocHienTai.x = 0; // Triệt tiêu vận tốc theo trục bị va chạm
+                this.vanTocHienTai.x = 0;
             }
         }
 
@@ -221,4 +226,9 @@ class MCVSystem {
             controller.update();
         });
     }
+}
+
+// Tự động gán vào window để tương thích với HTML script tag thông thường
+if (typeof window !== 'undefined') {
+    window.MCVSystem = MCVSystem;
 }
